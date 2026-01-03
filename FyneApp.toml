@@ -1,0 +1,8 @@
+Website = "https://github.com/keithmartin1982/downloader"
+
+[Details]
+Icon = "Icon.png"
+Name = "Downloader"
+ID = "keith.martin.downloader"
+Version = "0.0.1"
+Build = 1
