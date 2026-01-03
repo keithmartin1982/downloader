@@ -21,14 +21,16 @@ import (
 const (
 	ProgramName = "github.com/keithmartin1982/downloader"
 	Version     = "0.0.1"
+	PlaceHolder = "http://127.0.0.1:8080/files/largefile.bin"
 )
 
 var (
-	progressChan chan ProgressMessage
-	downloading  bool
-	currentSpeed float64
-	lastTime     time.Time
-	lastBytes    int64
+	ALREADY_DOWNLOADED_ERROR = errors.New("already downloaded")
+	progressChan             chan ProgressMessage
+	downloading              bool
+	currentSpeed             float64
+	lastTime                 time.Time
+	lastBytes                int64
 )
 
 func formatBytes(b int64) string {
@@ -101,8 +103,8 @@ func (g *GUI) start() {
 	metadata := g.app.Metadata()
 	window := g.app.NewWindow(fmt.Sprintf("%s %s build %d", metadata.Name, metadata.Version, metadata.Build))
 	input := widget.NewEntry()
-	input.SetPlaceHolder("https://example.com/testfile.bin")
-	// input.SetText("https://testfiles.hostnetworks.com.au/10MB.iso") test file
+	input.SetPlaceHolder(PlaceHolder)
+	// input.SetText(PlaceHolder) // test
 	progressBar := widget.NewProgressBar()
 	progressBar.Max = 100
 	progressBar.Min = 0
@@ -116,18 +118,35 @@ func (g *GUI) start() {
 				return
 			}
 			if isValidURL(input.Text) {
-				//log.Println("Valid Url:", input.Text)
 				g.Downloader.Addr = input.Text
+				g.Downloader.FileSize = 0
 				go func() {
-					downloading = true
 					if err := g.Downloader.Download(); err != nil {
-						log.Fatal(err)
+						downloading = false
+						if errors.Is(ALREADY_DOWNLOADED_ERROR, err) {
+							fyne.Do(func() {
+								statusOutput.SetText(fmt.Sprintf("Already Downloaded:\n%s", g.Downloader.Addr))
+							})
+							g.Downloader.FileSize = -1
+							downloading = true
+							return
+						}
+						fyne.Do(func() {
+							statusOutput.SetText(fmt.Sprintf("FAILED\n Download:\n%s", g.Downloader.Addr))
+						})
+						log.Printf("Download failed: %s", err)
 					}
 					downloading = false
 				}()
-				// Wait for fileInfo to be populated
-				for g.Downloader.FileSize == 0 {
+				// Wait for download to start
+				for !downloading {
 					continue
+				}
+				if g.Downloader.FileSize == -1 {
+					g.Downloader.FileSize = 0
+					fmt.Println("Download cancelled")
+					downloading = false
+					return
 				}
 				fyne.Do(func() {
 					statusOutput.SetText(fmt.Sprintf("Downloading:\n%s\nSize: %dMB\n", g.Downloader.Addr, g.Downloader.FileSize/1024/1024))
@@ -143,7 +162,6 @@ func (g *GUI) start() {
 								currentSpeed))
 						})
 						if currentProgress.Downloaded == currentProgress.Total && currentProgress.Downloaded > 0 {
-							fmt.Println("exiting goroutine")
 							return
 						}
 					}
@@ -223,6 +241,10 @@ func (d *Downloader) openFile() (*os.File, error) {
 }
 
 func (d *Downloader) Download() error {
+	defer func() {
+		downloading = false
+		d.headers = []Header{}
+	}()
 	if err := d.getFileInfo(); err != nil {
 		return errors.New(fmt.Sprint("Error getting filename ", d.Addr, ": ", err))
 	}
@@ -231,14 +253,17 @@ func (d *Downloader) Download() error {
 	if info, err := os.Stat(d.Filename); err == nil {
 		resume = info.Size()
 	}
-	if resume > 0 {
-		d.headers = append(d.headers, Header{key: "Range", value: fmt.Sprintf("bytes=%d-", resume)})
+	if resume == d.FileSize {
+		return ALREADY_DOWNLOADED_ERROR
 	}
 	file, err := d.openFile()
 	if err != nil {
 		return errors.New(fmt.Sprint("Error creating file: ", d.Addr, ": ", err))
 	}
 	defer file.Close()
+	if resume > 0 {
+		d.headers = append(d.headers, Header{key: "Range", value: fmt.Sprintf("bytes=%d-", resume)})
+	}
 	resp, err := d.get(d.Addr)
 	if err != nil {
 		return errors.New(fmt.Sprint("Error downloading ", d.Addr, ": ", err))
@@ -252,7 +277,6 @@ func (d *Downloader) Download() error {
 		time.Sleep(250 * time.Millisecond)
 		for {
 			if d.Progress.Downloaded == d.Progress.Total && d.Progress.Downloaded > 0 {
-				fmt.Println("exiting goroutine")
 				return
 			}
 			currentSpeed = calculateBps(lastTime, lastBytes, time.Now(), d.Progress.Downloaded) / 1_000_000
@@ -267,13 +291,12 @@ func (d *Downloader) Download() error {
 			return errors.New(fmt.Sprint("Error seeking ", d.Addr, ": ", err))
 		}
 	}
+	downloading = true
 	_, err = io.Copy(file, d.Progress)
 	if err != nil {
 		return errors.New(fmt.Sprint("Error downloading ", d.Addr, ": ", err))
 	}
 	fmt.Println("\nDownload complete!")
-	d.Filename = ""
-	d.FileSize = 0
 	return nil
 }
 
@@ -282,8 +305,8 @@ func main() {
 	d := &Downloader{}
 	d.Client = &http.Client{}
 	guiEnable := false
-	flag.BoolVar(&guiEnable, "g", false, "enable gui")
-	flag.StringVar(&d.Addr, "u", "", "url of file")
+	flag.BoolVar(&guiEnable, "g", false, "\nenable gui")
+	flag.StringVar(&d.Addr, "u", "", "url of file\n example: -u "+PlaceHolder)
 	flag.StringVar(&d.Filename, "f", "", "output file name")
 	flag.Parse()
 	if guiEnable {
@@ -295,7 +318,7 @@ func main() {
 		return
 	}
 	if d.Addr == "" {
-		fmt.Printf("Example Usage: %s -f file.ext -u http://example.com/file342137.ext\n", os.Args[0])
+		fmt.Printf("Example Usage: %s -f file.ext -u %s\n", os.Args[0], PlaceHolder)
 		flag.Usage()
 		os.Exit(1)
 	}
